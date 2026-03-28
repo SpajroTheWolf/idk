@@ -34,9 +34,10 @@ class AuthData(BaseModel):
 
 # ---------------- UTILS ----------------
 def hash_password(password: str):
-    return pwd_context.hash(password)
+    return pwd_context.hash(password[:72])
 
 def verify_password(plain, hashed):
+    plain = hashlib.sha256(plain.encode()).hexdigest()
     return pwd_context.verify(plain, hashed)
 
 def generate_api_key():
