@@ -1,49 +1,69 @@
-import sqlite3
+import os
 import bcrypt
 import uuid
-import os
 import re
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from functools import wraps
 from typing import Tuple, Dict, Any
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 CORS(app)
 app.config['JSON_SORT_KEYS'] = False
 
-# Konfiguracja bazy danych
-DB_PATH = 'users.db'
+# Konfiguracja bazy danych - PostgreSQL
+DATABASE_URL = os.environ.get('DATABASE_URL')
+if not DATABASE_URL:
+    # Dla testów lokalnych
+    DATABASE_URL = "postgresql://localhost/users_db"
+
 SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-key-change-in-production')
 
-# Inicjalizuj bazę danych przy starcie (dla Renderu)
-try:
-    init_db()
-except:
-    pass
-
 # ==================== INICJALIZACJA BAZY DANYCH ====================
+
+def get_db_connection():
+    """Zwraca połączenie z bazą danych"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except psycopg2.Error as e:
+        print(f"Błąd połączenia z bazą: {e}")
+        return None
 
 def init_db():
     """Inicjalizuje bazę danych"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
+        if not conn:
+            return False
+        
         c = conn.cursor()
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 api_key TEXT UNIQUE NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_login TIMESTAMP
+                last_login TIMESTAMP DEFAULT NULL
             )
         ''')
         conn.commit()
+        c.close()
         conn.close()
-    except Exception as e:
+        return True
+    except psycopg2.Error as e:
         print(f"Błąd inicjalizacji bazy danych: {e}")
+        return False
+
+# Middleware do inicjalizacji bazy przy każdym żądaniu
+@app.before_request
+def ensure_db():
+    """Upewnia się że baza danych istnieje"""
+    init_db()
 
 # ==================== WALIDACJA ====================
 
@@ -96,12 +116,19 @@ def generate_api_key() -> str:
 
 def user_exists(username: str) -> bool:
     """Sprawdza czy użytkownik istnieje"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id FROM users WHERE username = ?', (username,))
-    result = c.fetchone()
-    conn.close()
-    return result is not None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        
+        c = conn.cursor()
+        c.execute('SELECT id FROM users WHERE username = %s', (username,))
+        result = c.fetchone()
+        c.close()
+        conn.close()
+        return result is not None
+    except psycopg2.Error:
+        return False
 
 def create_user(username: str, password: str) -> Dict[str, Any]:
     """Tworzy nowego użytkownika"""
@@ -109,13 +136,17 @@ def create_user(username: str, password: str) -> Dict[str, Any]:
         password_hash = hash_password(password)
         api_key = generate_api_key()
         
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
+        if not conn:
+            return {'success': False, 'message': 'Błąd połączenia z bazą'}
+        
         c = conn.cursor()
         c.execute('''
             INSERT INTO users (username, password_hash, api_key)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
         ''', (username, password_hash, api_key))
         conn.commit()
+        c.close()
         conn.close()
         
         return {
@@ -124,7 +155,7 @@ def create_user(username: str, password: str) -> Dict[str, Any]:
             'api_key': api_key,
             'message': 'Konto stworzono pomyślnie'
         }
-    except sqlite3.IntegrityError:
+    except psycopg2.IntegrityError:
         return {
             'success': False,
             'message': 'Nazwa użytkownika już istnieje'
@@ -137,52 +168,65 @@ def create_user(username: str, password: str) -> Dict[str, Any]:
 
 def authenticate_user(username: str, password: str, api_key: str) -> Dict[str, Any]:
     """Autentykuje użytkownika"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        SELECT id, username, password_hash, api_key, created_at, last_login
-        FROM users WHERE username = ?
-    ''', (username,))
-    user = c.fetchone()
-    conn.close()
-    
-    if not user:
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {'success': False, 'message': 'Błąd połączenia z bazą'}
+        
+        c = conn.cursor()
+        c.execute('''
+            SELECT id, username, password_hash, api_key, created_at, last_login
+            FROM users WHERE username = %s
+        ''', (username,))
+        user = c.fetchone()
+        
+        if not user:
+            c.close()
+            conn.close()
+            return {
+                'success': False,
+                'message': 'Użytkownik nie istnieje'
+            }
+        
+        user_id, stored_username, password_hash, stored_api_key, created_at, last_login = user
+        
+        # Sprawdzenie hasła
+        if not verify_password(password, password_hash):
+            c.close()
+            conn.close()
+            return {
+                'success': False,
+                'message': 'Nieprawidłowe hasło'
+            }
+        
+        # Sprawdzenie klucza API
+        if api_key != stored_api_key:
+            c.close()
+            conn.close()
+            return {
+                'success': False,
+                'message': 'Nieprawidłowy klucz API'
+            }
+        
+        # Aktualizacja last_login
+        c.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = %s', (user_id,))
+        conn.commit()
+        c.close()
+        conn.close()
+        
+        return {
+            'success': True,
+            'username': stored_username,
+            'api_key': stored_api_key,
+            'created_at': created_at.isoformat() if created_at else None,
+            'last_login': datetime.now().isoformat(),
+            'message': 'Zalogowano pomyślnie'
+        }
+    except Exception as e:
         return {
             'success': False,
-            'message': 'Użytkownik nie istnieje'
+            'message': f'Błąd: {str(e)}'
         }
-    
-    user_id, stored_username, password_hash, stored_api_key, created_at, last_login = user
-    
-    # Sprawdzenie hasła
-    if not verify_password(password, password_hash):
-        return {
-            'success': False,
-            'message': 'Nieprawidłowe hasło'
-        }
-    
-    # Sprawdzenie klucza API
-    if api_key != stored_api_key:
-        return {
-            'success': False,
-            'message': 'Nieprawidłowy klucz API'
-        }
-    
-    # Aktualizacja last_login
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-    
-    return {
-        'success': True,
-        'username': stored_username,
-        'api_key': stored_api_key,
-        'created_at': created_at,
-        'last_login': datetime.now().isoformat(),
-        'message': 'Zalogowano pomyślnie'
-    }
 
 # ==================== RATE LIMITING ====================
 
@@ -368,10 +412,17 @@ def validate_key():
                 'message': 'Wymagane pole: api_key'
             }), 400
         
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'message': 'Błąd połączenia z bazą'
+            }), 500
+        
         c = conn.cursor()
-        c.execute('SELECT username FROM users WHERE api_key = ?', (api_key,))
+        c.execute('SELECT username FROM users WHERE api_key = %s', (api_key,))
         user = c.fetchone()
+        c.close()
         conn.close()
         
         if user:
