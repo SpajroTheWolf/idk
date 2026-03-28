@@ -17,24 +17,33 @@ app.config['JSON_SORT_KEYS'] = False
 DB_PATH = 'users.db'
 SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-key-change-in-production')
 
+# Inicjalizuj bazę danych przy starcie (dla Renderu)
+try:
+    init_db()
+except:
+    pass
+
 # ==================== INICJALIZACJA BAZY DANYCH ====================
 
 def init_db():
     """Inicjalizuje bazę danych"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            api_key TEXT UNIQUE NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_login TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                api_key TEXT UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Błąd inicjalizacji bazy danych: {e}")
 
 # ==================== WALIDACJA ====================
 
