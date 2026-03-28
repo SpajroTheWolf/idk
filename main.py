@@ -4,6 +4,7 @@ from passlib.context import CryptContext
 from sqlalchemy import create_engine, Column, String
 from sqlalchemy.orm import sessionmaker, declarative_base
 import secrets
+import hashlib
 
 # ---------------- CONFIG ----------------
 DATABASE_URL = "sqlite:///./users.db"
@@ -34,11 +35,10 @@ class AuthData(BaseModel):
 
 # ---------------- UTILS ----------------
 def hash_password(password: str):
-    return pwd_context.hash(password[:72])
+    return hashlib.sha256(password.encode()).hexdigest()
 
 def verify_password(plain, hashed):
-    plain = hashlib.sha256(plain.encode()).hexdigest()
-    return pwd_context.verify(plain, hashed)
+    return hashlib.sha256(plain.encode()).hexdigest() == hashed
 
 def generate_api_key():
     return secrets.token_hex(32)
